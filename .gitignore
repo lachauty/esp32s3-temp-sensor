@@ -1,0 +1,33 @@
+﻿# Build & IDE
+build/
+.vscode/
+.devcontainer/
+CMakeFiles/
+CMakeCache.txt
+cmake-build*/
+*.cmake
+
+# ESP-IDF outputs
+*.bin
+*.elf
+*.map
+flash_project_args
+flash_args
+partition_table/*.bin
+bootloader/*.bin
+
+# SDK config artifacts
+sdkconfig.old
+
+# Python/Node clutter
+__pycache__/
+*.pyc
+node_modules/
+
+# OS cruft
+.DS_Store
+Thumbs.db
+
+# Secrets
+.env
+.env.*
