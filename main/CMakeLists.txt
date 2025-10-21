@@ -1,3 +1,4 @@
+#CMakeLists.txt
 idf_component_register(
   SRCS
     "Temperature-Sensor.c"
@@ -5,20 +6,17 @@ idf_component_register(
     "portal.c"
     "nvs_kv.c"
     "max31856.c"
-  INCLUDE_DIRS
-    "."
-  REQUIRES               # headers/APIs used by your code
-    driver
-    esp_wifi
-    esp_netif
-    esp_event
-    nvs_flash
-    lwip
+  INCLUDE_DIRS "."
+  REQUIRES
     esp_http_client
     esp_http_server
-    esp_timer
-  PRIV_REQUIRES          # TLS + WPA2-Enterprise bits
-    mbedtls
     esp-tls
+    esp_wifi
+    esp_event
+    esp_netif
+    nvs_flash
+    driver
+    esp_timer
+  PRIV_REQUIRES
     wpa_supplicant
 )
