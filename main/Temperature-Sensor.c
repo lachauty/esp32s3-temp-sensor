@@ -4,7 +4,7 @@
 // - SNTP time sync (TLS needs correct clock)
 // - Cert bundle trust (Let's Encrypt, etc.)
 // - MAX31856 read + per-interval POST with queue
-// - Health checks + alert LED (GPIO40) if no successful ingest
+// - Health checks + alert LED (GPIO1) if no successful ingest
 // - SoftAP portal fallback if Wi-Fi not provisioned
 
 #include <stdio.h>
@@ -388,7 +388,7 @@ void app_main(void) {
     esp_task_wdt_reconfigure(&twdt_cfg);
 
 
-    // Optional: quick LED blink to prove GPIO40 works
+    // Optional: quick LED blink to prove GPIO1 works
     gpio_config_t io = {
         .pin_bit_mask = 1ULL << ALERT_LED_GPIO,
         .mode = GPIO_MODE_OUTPUT,
