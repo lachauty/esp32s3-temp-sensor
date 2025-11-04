@@ -40,18 +40,25 @@
 
 // -------------------- Settings --------------------
 static const char *TAG = "APP";
-
 #define WIFI_CONNECT_TIMEOUT_MS   40000   // Enterprise can take a while
+
+#define POST_PERIOD_MS 15000   // Default post cadence
+
+#define USE_SMOOTHING     1
+#define SMOOTH_ALPHA      0.25f
+
+static char s_base_url[128] = {0};
+static bool s_use_tls = false;
+
+static const char *URL_LOCAL = "http://172.16.0.123:3000";
+static const char *URL_CLOUD = "https://freezer-monitor-server.onrender.com";
 
 #define ENABLE_HTTP_POST 1
 #if ENABLE_HTTP_POST
   static int http_post_reading(const char *device_id, float temp_c, uint8_t sr, int64_t ts_ms);
-// Cloud ingest endpoint (HTTPS, no :3000)
-  #define API_URL        "https://freezer-monitor-server.onrender.com/ingest"
+
   // MUST match Render → Environment → API_KEY
   #define API_KEY        "super_secret_key_here"
-  // Default post cadence
-  #define POST_PERIOD_MS 15000
   #else
   static inline int http_post_reading(const char *device_id, float temp_c, uint8_t sr, int64_t ts_ms)
   { (void)device_id; (void)temp_c; (void)sr; (void)ts_ms; return -1; }
@@ -73,6 +80,12 @@ typedef struct {
 
 // Forward declarations used by tasks:
 static bool https_health_check(void);
+
+// Forward declarations for helpers used before their definitions
+static bool try_health_once(const char *base, bool tls);
+static void pick_base_url(void);
+static void maybe_prefer_local_again(void);
+
 
 // Queue
 static reading_t   s_rb[RB_CAP];
@@ -134,19 +147,38 @@ static void cb_health(void *arg){
 
 // -------------------- Tasks --------------------
 static void task_sensor(void *arg){
+
+    static bool  s_have_filt = false;
+    static float s_filt_c    = 0.0f;
+
     for(;;){
         // wait for “software interrupt” from sample timer
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
 
         float t=0; uint8_t sr=0;
         if (max31856_get_temp_c(&t, &sr)) {
+
+            // Fault-aware smoothing: if sr!=0, treat as raw (don’t smooth faults)
+            float use_c = t;
+#if USE_SMOOTHING
+            if (sr == 0) {
+                if (!s_have_filt) { s_filt_c = t; s_have_filt = true; }
+                else              { s_filt_c = SMOOTH_ALPHA * t + (1.0f - SMOOTH_ALPHA) * s_filt_c; }
+                use_c = s_filt_c;
+            } else {
+                // pass through raw on fault; keep EMA state so it catches up next sample
+                use_c = t;
+            }
+#endif
+
             struct timeval tv; gettimeofday(&tv, NULL);
             int64_t ts_ms = (int64_t)tv.tv_sec * 1000 + tv.tv_usec / 1000;
         
-            reading_t r = { .t_c = t, .sr = sr, .ts_ms_utc = ts_ms };
+            reading_t r = { .t_c = use_c, .sr = sr, .ts_ms_utc = ts_ms };
             rb_push(r);
-            ESP_LOGI(TAG, "Sample queued: %.2f°C (sr=0x%02X) @ %lld",
-                     t, sr, (long long)ts_ms);
+            
+            ESP_LOGI(TAG, "Sample queued: raw=%.2f°C filt=%.2f°C -> send=%.2f°C (sr=0x%02X) @ %lld",
+            t, s_have_filt ? s_filt_c : t, r.t_c, sr, (long long)ts_ms);
         }else {
             ESP_LOGW(TAG, "MAX31856 read failed");
         }
@@ -182,6 +214,7 @@ static void task_net(void *arg){
         if (now - last_health_us >= HEALTH_PERIOD_US) {
             ok = https_health_check();
             last_health_us = now;
+            maybe_prefer_local_again();
         }
 
         if (ok && !s_server_ok) {
@@ -200,7 +233,18 @@ static void task_net(void *arg){
                 if (sc == 200) {
                     s_last_ingest_ok_us = esp_timer_get_time();
                     sent++;
+                } else if (sc >= 500 || sc < 0) {
+                    // server problem or transport error → requeue and stop for now
+                    rb_push(r);
+                    break;
+                } else if (sc == 401 || sc == 403) {
+                    ESP_LOGE(TAG, "Forbidden (API key?) — dropping sample and keeping alert active");
+                    // drop this sample; optionally set a sticky flag to blink LED faster
+                } else if (sc >= 400) {
+                    ESP_LOGW(TAG, "Client error %d — dropping bad sample", sc);
+                    // drop this sample (don’t requeue)
                 } else {
+                    // unexpected → be conservative
                     rb_push(r);
                     break;
                 }
@@ -226,6 +270,20 @@ static void task_net(void *arg){
     }
 }
 
+static void maybe_prefer_local_again(void) {
+    static int counter = 0;
+    if (++counter % 5) return; // every 5 health cycles (~5 min)
+
+    if (strcmp(s_base_url, URL_LOCAL) != 0) {
+        if (try_health_once(URL_LOCAL, false)) {
+            strncpy(s_base_url, URL_LOCAL, sizeof(s_base_url)-1);
+            s_use_tls = false;
+            ESP_LOGI(TAG, "Re-selected BASE=LOCAL: %s", s_base_url);
+        }
+    }
+}
+
+
 // -------------------- Helpers --------------------
 static void sntp_sync(void) {
     // Start SNTP and wait until time is sane (> 2021-01-01)
@@ -238,44 +296,78 @@ static void sntp_sync(void) {
 }
 
 static bool https_health_check(void) {
+    return try_health_once(s_base_url, s_use_tls);
+}
+
+static bool try_health_once(const char *base, bool tls){
+    char url[200];
+    snprintf(url, sizeof(url), "%s/health", base);
+
     esp_http_client_config_t hc = {
-        .url = "https://freezer-monitor-server.onrender.com/health",
-        .transport_type = HTTP_TRANSPORT_OVER_SSL,
-        .crt_bundle_attach = esp_crt_bundle_attach,
+        .url = url,
+        .transport_type = tls ? HTTP_TRANSPORT_OVER_SSL : HTTP_TRANSPORT_OVER_TCP,
+        .crt_bundle_attach = tls ? esp_crt_bundle_attach : NULL,
         .timeout_ms = 8000,
         .keep_alive_enable = false,
     };
     esp_http_client_handle_t h = esp_http_client_init(&hc);
-    if (!h) { ESP_LOGW(TAG, "health: init failed"); return false; }
+    if (!h) { ESP_LOGW(TAG, "health(init) failed"); return false; }
 
     bool ok = false;
     esp_err_t err = esp_http_client_perform(h);
     if (err == ESP_OK) {
         int sc = esp_http_client_get_status_code(h);
-        ESP_LOGI(TAG, "GET /health -> %d", sc);
-        ok = (sc == 200);
+        ESP_LOGI(TAG, "GET /health -> %d (%s)", sc, base);
+        ok = (sc == 200 || sc == 503);
     } else {
-        ESP_LOGW(TAG, "GET /health failed: %s (errno=%d)",
-                 esp_err_to_name(err), esp_http_client_get_errno(h));
-        ok = false;
+        ESP_LOGW(TAG, "GET /health failed (%s): %s (errno=%d)",
+                 base, esp_err_to_name(err), esp_http_client_get_errno(h));
     }
     esp_http_client_cleanup(h);
     return ok;
 }
+
+static void pick_base_url(void){
+    // Try LOCAL first
+    if (try_health_once(URL_LOCAL, /*tls=*/false)) {
+        strncpy(s_base_url, URL_LOCAL, sizeof(s_base_url)-1);
+        s_use_tls = false;
+        ESP_LOGI(TAG, "Selected BASE=LOCAL: %s", s_base_url);
+        return;
+    }
+    // Fallback to CLOUD
+    if (try_health_once(URL_CLOUD, /*tls=*/true)) {
+        strncpy(s_base_url, URL_CLOUD, sizeof(s_base_url)-1);
+        s_use_tls = true;
+        ESP_LOGI(TAG, "Selected BASE=CLOUD: %s", s_base_url);
+        return;
+    }
+    // Neither reachable (keep last choice if any)
+    if (!s_base_url[0]) {
+        // default to CLOUD if nothing known yet; will retry via periodic health
+        strncpy(s_base_url, URL_CLOUD, sizeof(s_base_url)-1);
+        s_use_tls = true;
+        ESP_LOGW(TAG, "No server reachable; defaulting BASE=%s", s_base_url);
+    }
+}
+
 
 #if ENABLE_HTTP_POST
 static int http_post_reading(const char *device_id, float temp_c, uint8_t sr, int64_t ts_ms) {
     char body[256];
     int n = snprintf(body, sizeof(body),
                      "{\"device_id\":\"%s\",\"temp_c\":%.2f,\"sr\":%u,\"ts_ms\":%lld}",
-        device_id, temp_c, (unsigned)sr, (long long)ts_ms);
+                     device_id, temp_c, (unsigned)sr, (long long)ts_ms);
     if (n < 0 || n >= (int)sizeof(body)) return -1;
 
+    char url[200];
+    snprintf(url, sizeof(url), "%s/ingest", s_base_url);
+
     esp_http_client_config_t cfg = {
-        .url = API_URL,
+        .url = url,
         .method = HTTP_METHOD_POST,
-        .transport_type = HTTP_TRANSPORT_OVER_SSL,
-        .crt_bundle_attach = esp_crt_bundle_attach,
+        .transport_type = s_use_tls ? HTTP_TRANSPORT_OVER_SSL : HTTP_TRANSPORT_OVER_TCP,
+        .crt_bundle_attach = s_use_tls ? esp_crt_bundle_attach : NULL,
         .timeout_ms = 10000,
         .keep_alive_enable = true,
     };
@@ -291,20 +383,21 @@ static int http_post_reading(const char *device_id, float temp_c, uint8_t sr, in
     esp_err_t err = esp_http_client_perform(client);
     if (err == ESP_OK) {
         status = esp_http_client_get_status_code(client);
-        ESP_LOGI(TAG, "POST /ingest -> %d", status);
+        ESP_LOGI(TAG, "POST /ingest -> %d (%s)", status, s_base_url);
         if (status != 200) {
             char buf[160];
             int rd = esp_http_client_read_response(client, buf, sizeof(buf)-1);
             if (rd > 0) { buf[rd]=0; ESP_LOGW(TAG, "resp: %s", buf); }
         }
     } else {
-        ESP_LOGE(TAG, "HTTP POST failed: %s, errno=%d",
-                 esp_err_to_name(err), esp_http_client_get_errno(client));
+        ESP_LOGE(TAG, "HTTP POST failed (%s): %s, errno=%d",
+                 s_base_url, esp_err_to_name(err), esp_http_client_get_errno(client));
         status = -1;
     }
     esp_http_client_cleanup(client);
     return status;
 }
+
 #endif
 
 static void get_device_id(char *out, size_t len) {
@@ -371,7 +464,10 @@ void app_main(void) {
 
     // ------- TLS prerequisites -------
     sntp_sync();
-    s_server_ok = https_health_check();
+
+    // Pick LOCAL, else CLOUD; this also probes both /health once
+    pick_base_url();
+    s_server_ok = try_health_once(s_base_url, s_use_tls);
 
     // ------- Device ID -------
     char device_id[32] = {0};

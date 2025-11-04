@@ -8,3 +8,11 @@ While many labs use backup power systems to keep freezers operational during pow
 
 Our project addresses this problem by developing a temperature monitoring and alert system that continuously samples temperature data from ULT freezers and send real-time alerts when readings go out of the acceptable range. The goal is to provide laboratory personnel with a reliable and automate early-warning system, reducing the risk of catastrophic sample loss.
 
+Approach
+
+In the starting processes of researching components and investigating software based solutions to designing a notification system, the main issues identified was 
+
+- The method of sending notifications to the user
+- Our transmission medium
+- Our sensor
+- How to handle our inputs & outputs
