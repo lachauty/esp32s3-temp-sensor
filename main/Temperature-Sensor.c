@@ -44,6 +44,9 @@ static const char *TAG = "APP";
 
 #define POST_PERIOD_MS 15000   // Default post cadence
 
+const char* PRIMARY_BASE = "https://freezer-monitor-server.onrender.com";
+const char* FALLBACK_BASE = "http://192.168.0.42:3000";  // your laptop / local server IP on the LAN
+
 #define USE_SMOOTHING     1
 #define SMOOTH_ALPHA      0.25f
 
@@ -260,12 +263,13 @@ static void task_net(void *arg){
             s_alert_active = true;
             update_alert_led(true);
             ESP_LOGW(TAG, "ALERT: No successful ingest for > %d min",
-                     (int)(ALERT_WINDOW_US/60000000LL));
+                (int)(ALERT_WINDOW_US/60000000LL));    
         }
         if (!overdue && s_alert_active){
             s_alert_active = false;
             update_alert_led(false);
         }
+
         
     }
 }
@@ -282,6 +286,7 @@ static void maybe_prefer_local_again(void) {
         }
     }
 }
+
 
 
 // -------------------- Helpers --------------------
@@ -344,12 +349,12 @@ static void pick_base_url(void){
     }
     // Neither reachable (keep last choice if any)
     if (!s_base_url[0]) {
-        // default to CLOUD if nothing known yet; will retry via periodic health
         strncpy(s_base_url, URL_CLOUD, sizeof(s_base_url)-1);
         s_use_tls = true;
         ESP_LOGW(TAG, "No server reachable; defaulting BASE=%s", s_base_url);
     }
 }
+
 
 
 #if ENABLE_HTTP_POST

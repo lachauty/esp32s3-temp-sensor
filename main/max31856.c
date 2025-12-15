@@ -1,4 +1,8 @@
 //max31856.c
+/*Reference:
+https://github.com/adafruit/Adafruit_MAX31856/blob/master/Adafruit_MAX31856.h
+https://www.analog.com/media/en/technical-documentation/data-sheets/max31856.pdf
+*/
 #include "max31856.h"
 #include "esp_log.h"
 #include <string.h>
@@ -55,18 +59,39 @@ static spi_device_handle_t s_dev = NULL;
 // ---------- Low-level SPI helpers ----------
 static esp_err_t write_reg(uint8_t reg, uint8_t val) {
     if (!s_dev) return ESP_ERR_INVALID_STATE;
+
+    //SPI register read/write format.
+    /*
+    The MAX31856 register address byte uses bit 7 (A7) to indicate direction
+    When Address 7 = 1 Write
+    When Address 7 = 0 Read
+    0x80 | reg sets Address 7 (Binary OR sets)
+    */
+
     uint8_t tx[2] = { (uint8_t)(0x80 | (reg & 0x7F)), val };
     spi_transaction_t t = { .length = 16, .tx_buffer = tx };
     return spi_device_transmit(s_dev, &t);
 }
 
+
+// read_reg caps at 32 bytes to allocate fixed buffers
 static esp_err_t read_regs(uint8_t start_reg, uint8_t *dst, size_t n) {
     if (!s_dev) return ESP_ERR_INVALID_STATE;
     if (!dst || n == 0 || n > 32) return ESP_ERR_INVALID_ARG;
 
     uint8_t tx[1 + 32] = {0};
     uint8_t rx[1 + 32] = {0};
+
+
+    //Read (multi-byte)
+    /*
+    1) Clock out the address byte (tx[0])
+    2) While clocking out the additional bytes, the chip shifts the data back
+    3) First received byte often corresponds to the address phase / junk / don't care
+       The real register data begins at rx[1] the next significant byte after the least significant byte.
+    */
     tx[0] = start_reg & 0x7F; // A7=0 → read
+
 
     spi_transaction_t t = {
         .length = (1 + n) * 8,
@@ -106,14 +131,39 @@ void max31856_attach(spi_device_handle_t dev) {
     s_dev = dev;
 }
 
+// Set wide thresholds to avoid fault interrupts tripping
+// Register CJHF (HIGH) set to Address 0x7F (127) Register CJLF (LOW) set to Address 0xC0 (-64)
+// CJHF = 0x7F and CJLF = 0xC0 defines the high and the low limits.
 void max31856_init(void) {
     // Wide thresholds
     write_reg(REG_CJHF,   0x7F); // +127°C
     write_reg(REG_CJLF,   0xC0); // -64°C
+
+    // LTHFTH/LTHFTL and LTLFTH/LTLFTL define thermocouple temp high/low limits.
+    // High Temperature fault limit / Low Temperature fault limit
+    /* 
+    LTHFTH: LT = Linearized Thermocouple Temperature, 
+            
+            LF = Low Fault, 
+            HF = High Fault, 
+
+            TH = Threshold High, (MSB)
+            TL = Threshold Low,  (LSB)
+
+            Example to calculate high and low fault:
+
+            Multiply to base 16    Convert to Hexadecimal
+            +20 °C -> 20 x 16 = 320 -> 0x0140
+            -90 °C -> -90 x 16 = -1440 -> 0xFA60
+    */
+
+    //High fault
     write_reg(REG_LTHFTH, 0x7F); // TC high max
-    write_reg(REG_LTHFTL, 0xFF);
+    write_reg(REG_LTHFTL, 0xFF); // -1
+
+    //Low fault
     write_reg(REG_LTLFTH, 0x80); // TC low min
-    write_reg(REG_LTLFTL, 0x00);
+    write_reg(REG_LTLFTL, 0x00); // 0
 
     // Cold-junction offset = 0
     write_reg(REG_CJTO, 0x00);
