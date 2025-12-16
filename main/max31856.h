@@ -19,7 +19,7 @@ void max31856_init(void);
 // Writes fault status register to *out_sr if non-NULL.
 bool max31856_get_temp_c(float *out_c, uint8_t *out_sr);
 
-// Optional debug: read cold-junction temp (guarded in .c)
+// read cold-junction temp (guarded in .c)
 void max31856_read_cj_debug(void);
 
 #ifdef __cplusplus

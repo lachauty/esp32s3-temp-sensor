@@ -169,12 +169,13 @@ void max31856_init(void) {
     write_reg(REG_CJTO, 0x00);
 
     // Continuous, 60 Hz (bit0=0), T-type + AVG=2
-    write_reg(REG_CR0, CR0_CMODE);      // 0x80
-    write_reg(REG_CR1, 0x10 | 0x07);    // AVG=2 | T-type
+    write_reg(REG_CR0, CR0_CMODE);      // 0x80 continuous conversion
+    write_reg(REG_CR1, 0x10 | 0x07);    // AVG=2 | T-type averaging & t type select
 
+    //Delay for 50 ms
     vTaskDelay(pdMS_TO_TICKS(50));
 
-    // Sanity log
+    // Sanity readback
     uint8_t cr0 = read_reg1(REG_CR0);
     uint8_t cr1 = read_reg1(REG_CR1);
     uint8_t cjhf = read_reg1(REG_CJHF), cjlf = read_reg1(REG_CJLF);
@@ -184,9 +185,12 @@ void max31856_init(void) {
              cr0, cr1, cjhf, cjlf, thh, thl, tlh, tll);
 }
 
+
 bool max31856_get_temp_c(float *out_c, uint8_t *out_sr) {
+    //Check float pointer
     if (!out_c) return false;
 
+    //Read the status register (Fault Bits)
     uint8_t sr = 0;
     if (read_regs(REG_SR, &sr, 1) != ESP_OK) {
         ESP_LOGE(TAG, "Read SR failed");
@@ -195,17 +199,24 @@ bool max31856_get_temp_c(float *out_c, uint8_t *out_sr) {
     log_faults(sr);
     if (out_sr) *out_sr = sr;
 
+    // Read 3 bytes of thermocouple temperatures
     uint8_t buf[3] = {0};
     if (read_regs(REG_LTCBH, buf, 3) != ESP_OK) {
         ESP_LOGE(TAG, "Read temp bytes failed");
         return false;
     }
 
+    // Pack 3 bytes into one integer
     int32_t raw = ((int32_t)buf[0] << 16) | ((int32_t)buf[1] << 8) | buf[2];
+    // Align to the signed temperature value
     raw >>= 5;                        // 19-bit value
+    // 0x40000 = 1 << 18 -> we want to target bit 18 since it is the MSB to extend bit to 32 bits
     if (raw & 0x40000) raw |= 0xFFF80000; // sign-extend to 32-bit
 
+    // Converting temperature to celsius
     float t = (float)raw * 0.0078125f + CALIBRATION_OFFSET; // 1/128 °C
+    
+    // Warning for temperature outside sanity window.
     if (t < TEMP_MIN_C || t > TEMP_MAX_C) {
         ESP_LOGW(TAG, "Temperature %.2f°C outside sanity window (%.1f..%.1f)!", t, TEMP_MIN_C, TEMP_MAX_C);
     }
@@ -213,8 +224,14 @@ bool max31856_get_temp_c(float *out_c, uint8_t *out_sr) {
     return true;
 }
 
+
 void max31856_read_cj_debug(void) {
     uint8_t b[2];
+    // Cold junction read/convert
+    // read bytes
+    // pack into integer
+    // right shift to align signed value
+    // scale to celsius
     if (read_regs(REG_CJTH, b, 2) == ESP_OK) {
         int16_t cj_raw = ((int16_t)b[0] << 8) | b[1];
         cj_raw >>= 2; // 14-bit 1/16°C
