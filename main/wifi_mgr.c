@@ -17,15 +17,11 @@
 
 static const char *TAG = "wifi_mgr";
 
-/* -------------------------------------------------------------------------- */
-/* Event bits / globals                                                       */
-/* -------------------------------------------------------------------------- */
+// Event group & GOT IP Bit
 static EventGroupHandle_t s_evt;
 #define GOT_IP_BIT BIT0
 
-/* -------------------------------------------------------------------------- */
-/* Helpers                                                                    */
-/* -------------------------------------------------------------------------- */
+// Try connect calls esp_wifi_connect but handles a common harmless case
 static void try_connect(void) {
     esp_err_t e = esp_wifi_connect();
     if (e == ESP_ERR_WIFI_CONN) {
@@ -37,6 +33,8 @@ static void try_connect(void) {
     }
 }
 
+// Stops Wi-Fi but tolerates "not started/initialized" to call anytime
+// Makes code simpler because there is no need to track states perfectly
 static void wifi_stop_safely(void) {
     esp_err_t e = esp_wifi_stop();
     // Tolerate "not init / not started" states so we can call this freely
@@ -45,45 +43,48 @@ static void wifi_stop_safely(void) {
     }
 }
 
-/* -------------------------------------------------------------------------- */
-/* Common event handler                                                       */
-/* -------------------------------------------------------------------------- */
+// Called when Wi-Fi events happen
 static void handler(void *arg, esp_event_base_t base, int32_t id, void *data) {
+    // STA mode starts -> immediately attempt connection
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
         try_connect();
-    } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
+    } 
+    // Clear "got IP" -> offline now
+    // wait 500 ms
+    // retry connection
+    else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
         xEventGroupClearBits(s_evt, GOT_IP_BIT);
         // small backoff before retrying
-        vTaskDelay(pdMS_TO_TICKS(800));
+        vTaskDelay(pdMS_TO_TICKS(500));
         try_connect();
-    } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
+    } 
+    // Got IP success signal
+    else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         xEventGroupSetBits(s_evt, GOT_IP_BIT);
     }
 }
 
-/* -------------------------------------------------------------------------- */
-/* One-time netif + Wi-Fi init                                                */
-/* -------------------------------------------------------------------------- */
+// One-time init function
 void wifi_netif_init_once(void) {
     static bool inited = false;
     if (inited) return;
 
-    // NVS for credentials
+    // nonvolatile storage checked to be ready
     ESP_ERROR_CHECK(kv_init());
 
-    // Netif + default event loop
+    // networking initialize and event creation
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
 
-    // Create default STA and AP interfaces (lets us switch modes later)
+    // create default Wifi station mode (STA) and AP netifs to switch modes later
     esp_netif_create_default_wifi_sta();
     esp_netif_create_default_wifi_ap();
 
-    // Wi-Fi driver
+    // Initialize Wi-Fi driver
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
 
-    // Event group + handlers
+    // Create Event group and event handlers
     s_evt = xEventGroupCreate();
     ESP_ERROR_CHECK(esp_event_handler_instance_register(
         WIFI_EVENT, ESP_EVENT_ANY_ID, &handler, NULL, NULL));
@@ -93,9 +94,11 @@ void wifi_netif_init_once(void) {
     inited = true;
 }
 
-/* -------------------------------------------------------------------------- */
-/* PSK (WPA/WPA2-PSK)                                                         */
-/* -------------------------------------------------------------------------- */
+// build a wifi config
+// set ssid and password using strncpy
+// clear GOT IP bit
+// stop Wifi and switch to station mode, set config, and start wifi
+// wait for GOT IP bit to timeout
 wifi_result_t wifi_connect_psk_now(const char *ssid, const char *pass, int timeout_ms) {
     if (!ssid || !*ssid) return WIFI_RES_FAIL;
 

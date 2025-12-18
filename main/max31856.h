@@ -1,4 +1,5 @@
 // max31856.h
+// Header file for max31856 interface
 #pragma once
 #include <stdbool.h>
 #include <stdint.h>

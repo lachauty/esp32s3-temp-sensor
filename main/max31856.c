@@ -1,4 +1,5 @@
 //max31856.c
+//Interface for the max31856 operational amplifier module
 /*Reference:
 https://github.com/adafruit/Adafruit_MAX31856/blob/master/Adafruit_MAX31856.h
 https://www.analog.com/media/en/technical-documentation/data-sheets/max31856.pdf
